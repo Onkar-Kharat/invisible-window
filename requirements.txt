@@ -1,0 +1,27 @@
+PyQt5==5.15.10
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.13.0
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+websockets==12.0
+websocket-client==1.8.0
+python-dotenv==1.0.1
+requests==2.32.3
+sounddevice==0.4.7
+numpy==1.26.4
+pydantic==2.7.4
+
+
+
+# Transcription backends (pick one or both; install what you need)
+# Option A: Vosk (offline, fast, recommended for real-time)
+vosk==0.3.45
+
+# Option B: faster-whisper (more accurate, slightly heavier)
+faster-whisper==1.0.3
+ctranslate2==4.0.0
+
+# Optional: AI provider SDKs (only needed if you enable those providers)
+# openai==1.35.0
+# anthropic==0.30.0
+# google-generativeai==0.7.2

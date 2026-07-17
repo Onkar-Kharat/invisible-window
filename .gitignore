@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Ignore custom project files
+ok.md
+run_app.bat
+start.md
+starts.md
+
+
+# Virtual environments
+.venv
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and lock files
+uv.lock
+.env
+.env.example
+.python-version
+
+
+# Environment folders 
+invisible_interview_assistant/
+invisible_window_main/
