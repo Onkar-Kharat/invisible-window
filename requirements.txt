@@ -11,7 +11,8 @@ sounddevice==0.4.7
 numpy==1.26.4
 pydantic==2.7.4
 
-
+# Voice Activity Detection (CPU-cheap, works with Vosk)
+webrtcvad==2.0.10
 
 # Transcription backends (pick one or both; install what you need)
 # Option A: Vosk (offline, fast, recommended for real-time)
@@ -25,3 +26,4 @@ ctranslate2==4.0.0
 # openai==1.35.0
 # anthropic==0.30.0
 # google-generativeai==0.7.2
+

@@ -5,7 +5,8 @@ The single class in this module, `StreamingCapture`, opens a
 sounddevice `InputStream` on the configured device (default: CABLE
 Output from VB-Audio Virtual Cable, which is the right source during
 a Zoom / Meet / Teams call) and pushes 4 KB chunks of mono 16 kHz
-int16 PCM into an `asyncio.Queue`. The audio runs at the device's
+int16 PCM into a thread-safe `queue.Queue` that is bridged into the
+asyncio world by a small task. The audio runs at the device's
 native sample rate and channel count and is resampled / downmixed
 inside the callback, so this works with a system-audio device that
 defaults to 48 kHz stereo.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import queue as _queue
 import threading
 from typing import Optional
 
@@ -117,7 +119,14 @@ class StreamingCapture:
         self._native_rate = int(device_info.get("default_samplerate", 48000))
         self._native_channels = min(int(device_info.get("max_input_channels", 2)), 2)
 
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
+        # Producer-side queue: thread-safe so the sounddevice audio
+        # callback can put_nowait() into it from the audio thread
+        # without crossing event-loop boundaries. We bridge it into
+        # an asyncio.Queue in `start()` so the existing async
+        # consumer (`chunks()`) doesn't need to change.
+        self._queue: _queue.Queue = _queue.Queue(maxsize=256)
+        self._async_queue: Optional[asyncio.Queue[bytes]] = None
+        self._bridge_task: Optional[asyncio.Task] = None
         self._stop_event = threading.Event()
         self._stream: Optional[sd.InputStream] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -125,23 +134,59 @@ class StreamingCapture:
     # -- device selection ------------------------------------------
 
     def _resolve_device_index(self) -> Optional[int]:
+        """
+        Pick an input device index. The user can:
+
+          * set `AUDIO_SOURCE=cable` (the default) and let us
+            auto-detect VB-Audio "CABLE Output", OR
+          * set `AUDIO_SOURCE=cable` and override with
+            `CABLE_DEVICE_INDEX=<n>` from `python -m sounddevice`.
+          * set `AUDIO_SOURCE=mic` to use the system default mic
+            (or `MIC_DEVICE_INDEX=<n>` to override).
+        """
         src = self.settings.audio_source
         if src == "cable":
-            # Try the explicit index from settings first, then auto-detect.
-            try:
-                sd.check_input_settings(settings=self.settings,  # type: ignore[arg-type]
-                                        device=self.settings.cable_device_index)
-                return self.settings.cable_device_index
-            except Exception:
-                pass
+            # Try the explicit index from settings first.
+            idx = self.settings.cable_device_index
+            if idx is not None and idx >= 0:
+                try:
+                    sd.check_input_settings(
+                        samplerate=sd.query_devices(idx).get(
+                            "default_samplerate", 48000),
+                        channels=1, dtype="float32", device=idx)
+                    print(f"[mic] using CABLE_DEVICE_INDEX={idx} from .env")
+                    return idx
+                except Exception as exc:
+                    print(f"[mic] CABLE_DEVICE_INDEX={idx} is invalid "
+                          f"({exc}); falling back to auto-detect")
             found = find_cable_output_device()
             if found is not None:
+                name = sd.query_devices(found).get("name", "?")
+                print(f"[mic] auto-detected CABLE Output at index "
+                      f"{found} ('{name}')")
                 return found
-            # Fall back to legacy DEVICE_INDEX.
-            return self.settings.legacy_device_index
+            # Last-resort fallback: legacy DEVICE_INDEX.
+            if self.settings.legacy_device_index is not None:
+                return self.settings.legacy_device_index
+            # Nothing matched. List inputs so the user can fix .env.
+            print("[mic] no CABLE Output device found. Available inputs:")
+            try:
+                for i, d in enumerate(sd.query_devices()):
+                    if d.get("max_input_channels", 0) > 0:
+                        print(f"  {i}: {d.get('name')!r}")
+            except Exception:
+                pass
+            return None
         if src == "mic":
-            return (self.settings.mic_device_index
-                    or self.settings.legacy_device_index)
+            idx = (self.settings.mic_device_index
+                   or self.settings.legacy_device_index)
+            if idx is not None and idx >= 0:
+                return idx
+            # Use the system default input.
+            try:
+                return sd.default.device[0]
+            except Exception:
+                return None
         # Unknown source — try CABLE auto-detect.
         return find_cable_output_device() or self.settings.legacy_device_index
 
@@ -160,6 +205,12 @@ class StreamingCapture:
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Open the input stream and start the audio thread."""
         self._loop = loop
+        # The async-side queue (consumed by `chunks()`).
+        self._async_queue = asyncio.Queue(maxsize=256)
+        # Bridge task: drains the thread-safe queue and feeds the
+        # asyncio queue. Never raises; on overflow it drops the
+        # oldest entry so we never block the audio path.
+        self._bridge_task = loop.create_task(self._bridge())
         self._stream = sd.InputStream(
             samplerate=self._native_rate,
             channels=self._native_channels,
@@ -179,6 +230,45 @@ class StreamingCapture:
             except Exception:
                 pass
             self._stream = None
+        if self._bridge_task is not None and self._loop is not None:
+            self._bridge_task.cancel()
+            self._bridge_task = None
+        self._async_queue = None
+
+    async def _bridge(self) -> None:
+        """
+        Move PCM frames from the thread-safe producer queue to the
+        asyncio consumer queue. If the asyncio queue fills, drop
+        the oldest frame — audio is real-time, old frames are
+        worthless, and we'd rather skip than back-pressure the
+        sounddevice callback.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    chunk = await loop.run_in_executor(
+                        None, self._queue.get, True, 0.05
+                    )
+                except _queue.Empty:
+                    continue
+                q = self._async_queue
+                if q is None:
+                    return
+                try:
+                    q.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    # Drop the oldest, then put the new one.
+                    try:
+                        q.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        q.put_nowait(chunk)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            return
 
     # -- callback (runs on sounddevice's thread) --------------------
 
@@ -195,10 +285,6 @@ class StreamingCapture:
         else:
             samples = indata[:, 0].copy() if indata.ndim == 2 else indata.copy()
 
-        # Cheap VAD: skip pure-silence chunks entirely.
-        if _rms(samples) < self.settings.silence_rms:
-            return
-
         # Resample to 16 kHz if needed.
         if self._native_rate != self.settings.sample_rate:
             samples = resample_mono(samples, self._native_rate,
@@ -210,17 +296,22 @@ class StreamingCapture:
 
         if self._loop is None:
             return
-        # Thread-safe enqueue from the audio thread; drop the oldest
-        # chunk if the queue is full so we never block the audio path.
+        # Producer side: thread-safe queue. We never call
+        # call_soon_threadsafe on an asyncio.Queue from the audio
+        # thread anymore — that path raises QueueFull *inside* the
+        # event-loop callback, which gets logged as a noisy
+        # "Exception in callback" traceback. The bridge task in
+        # `start()` handles the cross-thread hand-off.
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, pcm_i16)
-        except asyncio.QueueFull:
+            self._queue.put_nowait(pcm_i16)
+        except _queue.Full:
+            # Consumer is slow / wedged: drop the oldest frame.
             try:
-                self._loop.call_soon_threadsafe(self._queue.get_nowait)
+                self._queue.get_nowait()
             except Exception:
                 pass
             try:
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, pcm_i16)
+                self._queue.put_nowait(pcm_i16)
             except Exception:
                 pass
 
@@ -229,5 +320,8 @@ class StreamingCapture:
     async def chunks(self):
         """Async generator yielding raw int16 PCM chunks forever."""
         while not self._stop_event.is_set():
-            chunk = await self._queue.get()
+            q = self._async_queue
+            if q is None:
+                return
+            chunk = await q.get()
             yield chunk

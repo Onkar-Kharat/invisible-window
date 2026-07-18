@@ -6,6 +6,7 @@ def main():
     print("Starting backend and frontend...")
     
     # Start backend process using module execution (-m) to preserve sys.path
+    
     #backend = subprocess.Popen([sys.executable, "-m", "backend.main"])
     
     # Optional: wait a moment to ensure backend starts before frontend

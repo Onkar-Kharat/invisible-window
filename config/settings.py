@@ -38,6 +38,72 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _looks_like_vosk_model(path: str) -> bool:
+    """
+    A Vosk model directory always contains a `conf/` subdir with
+    mfcc.conf, model.conf, etc. Use that as a cheap, reliable
+    "is this actually a Vosk model?" check.
+    """
+    if not path:
+        return False
+    try:
+        return os.path.isdir(os.path.join(path, "conf"))
+    except Exception:
+        return False
+
+
+def _resolve_vosk_model_path(explicit: Optional[str]) -> str:
+    """
+    Find a usable Vosk model on disk.
+
+    Search order:
+      1. `VOSK_MODEL_PATH` from .env, if it points at a real model
+      2. ./models/vosk-model-small-en-us-0.15 (recommended)
+      3. ./model/vosk-model-small-en-us-0.15  (legacy)
+      4. Any ./models/vosk-model-*/  (auto-detect, if only one is present)
+      5. Any ./model/vosk-model-*/   (auto-detect, legacy)
+      6. The env value verbatim, even if invalid (so the eventual
+         error message names the exact path the user set)
+    """
+    default = "models/vosk-model-small-en-us-0.15"
+
+    # 1) explicit env value
+    if explicit and _looks_like_vosk_model(explicit):
+        return explicit
+
+    # 2) and 3) conventional locations
+    for cand in (default, "model/vosk-model-small-en-us-0.15"):
+        if _looks_like_vosk_model(cand):
+            return cand
+
+    # 4) and 5) auto-detect any vosk-model-* in models/ or model/
+    for parent in ("models", "model"):
+        try:
+            base = PROJECT_ROOT / parent
+        except Exception:
+            continue
+        if not base.is_dir():
+            continue
+        matches = sorted(
+            p for p in base.iterdir()
+            if p.is_dir() and p.name.startswith("vosk-model-")
+            and _looks_like_vosk_model(str(p))
+        )
+        if len(matches) == 1:
+            return str(matches[0])
+        if len(matches) > 1:
+            # Multiple candidates — pick the "small" one if present,
+            # otherwise the first.
+            for m in matches:
+                if "small" in m.name.lower():
+                    return str(m)
+            return str(matches[0])
+
+    # 6) Nothing matched. Return whatever was requested so the user's
+    #    error message points at the path they tried.
+    return explicit or default
+
+
 @dataclass
 class Settings:
     # --- AI routing ---
@@ -52,7 +118,13 @@ class Settings:
 
     # --- Transcription ---
     transcription_backend: str = os.getenv("TRANSCRIPTION_BACKEND", "vosk").lower()
-    vosk_model_path: str = os.getenv("VOSK_MODEL_PATH", "models/vosk-model-small-en-us-0.15")
+    # The Vosk model can live in any of these locations; we pick
+    # the first one that contains a `conf/` directory. This makes
+    # the project work whether the user unpacked the model into
+    # `models/...` (recommended) or `model/...` (legacy) or set
+    # VOSK_MODEL_PATH in .env.
+    vosk_model_path: str = _resolve_vosk_model_path(
+        os.getenv("VOSK_MODEL_PATH"))
     whisper_model_size: str = os.getenv("WHISPER_MODEL_SIZE", "small")
     whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
@@ -92,11 +164,44 @@ class Settings:
     # answer, so the user can read the question first.
     answer_delay_ms: int = _int("ANSWER_DELAY_MS", 2000)
 
+    # --- Session & Logging ---
+    session_dir: str = os.getenv("SESSION_DIR", "sessions")
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    
     # --- Overlay / server ---
     backend_host: str = os.getenv("BACKEND_HOST", "127.0.0.1")
     backend_port: int = _int("BACKEND_PORT", 8765)
     overlay_opacity: float = _float("OVERLAY_OPACITY", 0.85)
     overlay_font_size: int = _int("OVERLAY_FONT_SIZE", 14)
+    
+    # --- Voice Activity Detection ---
+    # Two flavors are supported:
+    #   * "webrtc"  — webrtcvad (lightweight, CPU-cheap). Recommended.
+    #   * "energy"  — RMS-threshold based VAD (current behaviour).
+    #   * "none"    — pass everything through to the recognizer.
+    vad_mode: str = os.getenv("VAD_MODE", "webrtc").lower()
+    # 0..3 (most aggressive = 3). webrtcvad only supports 10/20/30 ms
+    # frames at 8/16/32/48 kHz; the streaming layer pads/slices as
+    # needed.
+    vad_aggressiveness: int = _int("VAD_AGGRESSIVENESS", 2)
+    # Frames below this RMS are dropped before reaching Vosk
+    # (only used when vad_mode == "energy").
+    vad_rms_threshold: float = _float("VAD_RMS_THRESHOLD", 0.005)
+    # Pad each voiced segment with this much pre-roll so we don't
+    # clip the first word.
+    vad_padding_ms: int = _int("VAD_PADDING_MS", 300)
+
+    # Back-compat alias used elsewhere in the code base.
+    silence_rms: float = _float("SILENCE_RMS", 0.005)
+    silence_duration_ms: int = _int("SILENCE_DURATION_MS", 700)
+    vad_threshold: float = _float("VAD_THRESHOLD", 0.5)
+
+    # --- WebSocket audio streaming ---
+    # Maximum size (in bytes) of one audio frame on /ws/audio.
+    ws_audio_max_frame_bytes: int = _int("WS_AUDIO_MAX_FRAME_BYTES", 16 * 1024)
+
+    # --- Playback ---
+    playback_speed: float = _float("PLAYBACK_SPEED", 1.0)
 
 
 def get_settings() -> Settings:

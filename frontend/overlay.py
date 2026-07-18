@@ -184,6 +184,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self.act_bigger = toolbar.addAction("A+")
         self.act_opacity_down = toolbar.addAction("◐")
         self.act_opacity_up = toolbar.addAction("◑")
+        self.act_mic = toolbar.addAction("🎙 Mic: Off")
         self.act_hide = toolbar.addAction("Hide (Ctrl+Shift+H)")
 
         self.act_clear.triggered.connect(self.answer_view.clear_answers)
@@ -191,6 +192,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self.act_bigger.triggered.connect(lambda: self._bump_font(+1))
         self.act_opacity_down.triggered.connect(lambda: self._bump_opacity(-0.1))
         self.act_opacity_up.triggered.connect(lambda: self._bump_opacity(+0.1))
+        self.act_mic.triggered.connect(self.toggle_mic_capture)
         self.act_hide.triggered.connect(self.toggle_visibility)
 
         # Input Box + Ask Button at bottom
@@ -367,6 +369,49 @@ class OverlayWindow(QtWidgets.QWidget):
             self.show()
             self._apply_capture_affinity()
 
+    def toggle_mic_capture(self) -> None:
+        """
+        Toggles the backend's server-side microphone capture on/off
+        via the REST endpoint. The backend streams audio into Vosk
+        and broadcasts any committed question over /ws, which the
+        overlay's WebSocket client auto-pastes into the input box.
+        """
+        is_on = self.act_mic.text().startswith("🎙 Mic: On")
+        target_on = not is_on
+
+        def post():
+            try:
+                import requests
+                url = f"http://{self.settings.backend_host}:{self.settings.backend_port}/api/capture/{'start' if target_on else 'stop'}"
+                resp = requests.post(url, timeout=5.0)
+                ok = resp.status_code == 200
+            except Exception as exc:  # noqa: BLE001
+                print(f"[overlay] mic toggle error: {exc}")
+                ok = False
+            QtCore.QMetaObject.invokeMethod(
+                self, "_on_mic_toggle_complete",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, target_on),
+                QtCore.Q_ARG(bool, ok),
+            )
+
+        # Optimistic UI update so the click feels snappy.
+        self.act_mic.setText("🎙 Mic: …" if target_on else "🎙 Mic: Off")
+        import threading
+        threading.Thread(target=post, daemon=True).start()
+
+    @QtCore.pyqtSlot(bool, bool)
+    def _on_mic_toggle_complete(self, target_on: bool, ok: bool) -> None:
+        if not ok:
+            self.act_mic.setText("🎙 Mic: Error")
+            return
+        # The backend will follow up with an `audio_source` payload
+        # naming the device; until then show a generic On label.
+        if target_on:
+            self.act_mic.setText("🎙 Mic: On")
+        else:
+            self.act_mic.setText("🎙 Mic: Off")
+
     def render_payload(self, payload: dict) -> None:
         kind = payload.get("type")
         if kind == "stream_start":
@@ -385,8 +430,35 @@ class OverlayWindow(QtWidgets.QWidget):
                 f"<div style='color:#666; font-size:small; margin-top:2px'>via {self._esc(src)}</div>"
                 "<hr style='border: 0; border-top: 1px solid #333;'/>"
             )
+        elif kind == "question":
+            # Committed transcription from the mic pipeline — paste
+            # directly into the question input box so the user can
+            # edit & re-ask, or watch the answer stream in below.
+            q = payload.get("text", "").strip()
+            if q:
+                self.input_query.setText(q)
+                self.input_query.setFocus()
+                self.answer_view.append_html(
+                    f"<div style='color:#9ec5ff'><b>Q (heard):</b> {self._esc(q)}</div>"
+                )
+        elif kind == "partial":
+            # Show a faint "live" indicator line at the bottom of the
+            # answer view so the user can see the mic is working.
+            text = payload.get("text", "").strip()
+            if text:
+                self.answer_view.append_html(
+                    f"<div style='color:#888; font-size:small'><i>… {self._esc(text)}</i></div>"
+                )
+        elif kind == "speech":
+            active = bool(payload.get("active"))
+            label = "🎙 Mic: Listening…" if active else "🎙 Mic: Off"
+            self.act_mic.setText(label)
         elif kind == "audio_source":
-            pass
+            device = payload.get("device")
+            if device:
+                self.act_mic.setText(f"🎙 Mic: On ({device[:24]})")
+            else:
+                self.act_mic.setText("🎙 Mic: Off")
         elif kind == "state":
             pass
 
