@@ -11,7 +11,10 @@ ok.md
 run_app.bat
 start.md
 starts.md
-
+.python-version
+# Ignore run scripts
+run_all.ps1
+run_all.sh
 
 # Virtual environments
 .venv
@@ -28,5 +31,5 @@ uv.lock
 
 
 # Environment folders 
-invisible_interview_assistant/
+invisible_interview_main/
 invisible_window_main/

@@ -22,6 +22,7 @@ import asyncio
 import math
 import queue as _queue
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -130,6 +131,11 @@ class StreamingCapture:
         self._stop_event = threading.Event()
         self._stream: Optional[sd.InputStream] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Telemetry: how many PCM frames we've had to drop because the
+        # downstream consumer couldn't keep up. A non-zero value means
+        # the recognizer is missing audio and you should investigate.
+        self.dropped_frames: int = 0
+        self._last_drop_warn_at: float = 0.0
 
     # -- device selection ------------------------------------------
 
@@ -305,7 +311,19 @@ class StreamingCapture:
         try:
             self._queue.put_nowait(pcm_i16)
         except _queue.Full:
-            # Consumer is slow / wedged: drop the oldest frame.
+            # Consumer is slow / wedged: drop the oldest frame so the
+            # new one can go in. We never block the audio callback.
+            self.dropped_frames += 1
+            now = time.monotonic()
+            if now - self._last_drop_warn_at > 5.0:
+                # Throttle the warning so a sustained overflow doesn't
+                # spam the console. A real overflow is a sign that the
+                # recognizer thread is falling behind; investigate
+                # before trusting the resulting transcript.
+                print(f"[mic] WARNING: dropped {self.dropped_frames} "
+                      f"PCM frame(s) so far (consumer too slow).",
+                      flush=True)
+                self._last_drop_warn_at = now
             try:
                 self._queue.get_nowait()
             except Exception:

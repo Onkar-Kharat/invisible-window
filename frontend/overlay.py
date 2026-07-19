@@ -294,6 +294,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self.btn_ask.setText("Thinking…")
 
         def post_ask():
+            error_msg: Optional[str] = None
             try:
                 import requests
                 url = f"http://{self.settings.backend_host}:{self.settings.backend_port}/api/ask"
@@ -301,20 +302,37 @@ class OverlayWindow(QtWidgets.QWidget):
                     "question": query,
                     "model": self.selected_model
                 }
-                requests.post(url, json=payload, timeout=60.0)
+                resp = requests.post(url, json=payload, timeout=60.0)
+                if resp.status_code != 200:
+                    error_msg = f"HTTP {resp.status_code}: {resp.text[:120]}"
             except Exception as e:
                 print("Error posting question:", e)
+                error_msg = str(e)
             finally:
-                QtCore.QMetaObject.invokeMethod(self, "_on_ask_complete", QtCore.Qt.QueuedConnection)
+                QtCore.QMetaObject.invokeMethod(
+                    self, "_on_ask_complete",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, error_msg or ""),
+                )
 
         import threading
         threading.Thread(target=post_ask, daemon=True).start()
 
-    @QtCore.pyqtSlot()
-    def _on_ask_complete(self) -> None:
+    @QtCore.pyqtSlot(str)
+    def _on_ask_complete(self, error_msg: str) -> None:
         self.input_query.setEnabled(True)
         self.btn_ask.setEnabled(True)
         self.btn_ask.setText("Ask")
+        if error_msg:
+            # Show the failure in the answer view so the user knows
+            # their question never reached the LLM. Don't clear the
+            # input — let them edit and retry.
+            self.answer_view.append_html(
+                f"<div style='color:#ff8a8a'>"
+                f"<b>Ask failed:</b> {self._esc(error_msg)}"
+                f"</div>"
+            )
+            return
         self.input_query.clear()
         self.input_query.setFocus()
 
@@ -433,14 +451,15 @@ class OverlayWindow(QtWidgets.QWidget):
         elif kind == "question":
             # Committed transcription from the mic pipeline — paste
             # directly into the question input box so the user can
-            # edit & re-ask, or watch the answer stream in below.
+            # edit & re-ask. We deliberately do NOT also append a
+            # "Q (heard):" line to the answer view here: once the user
+            # presses Enter (or the manual Ask fires), the stream_start
+            # handler already renders a `Q:` line for this question.
+            # The double-display was a UX wart noted in the README.
             q = payload.get("text", "").strip()
             if q:
                 self.input_query.setText(q)
                 self.input_query.setFocus()
-                self.answer_view.append_html(
-                    f"<div style='color:#9ec5ff'><b>Q (heard):</b> {self._esc(q)}</div>"
-                )
         elif kind == "partial":
             # Show a faint "live" indicator line at the bottom of the
             # answer view so the user can see the mic is working.

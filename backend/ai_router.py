@@ -207,7 +207,11 @@ async def generate_answer(question: str, context: Optional[str] = None,
         )
         if text:
             return text, "ollama"
-    except (requests.RequestException, asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+    except (requests.RequestException, asyncio.TimeoutError) as exc:
+        # Network/timeout failure only. Programming errors (TypeError,
+        # KeyError, ...) are deliberately NOT caught here so they
+        # surface in the console instead of being silently masked by
+        # the external fallback.
         print(f"[ai] Ollama failed ({exc.__class__.__name__}: {exc}); falling back.")
 
     # 2) Fallback to external

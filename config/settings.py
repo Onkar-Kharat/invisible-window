@@ -192,7 +192,10 @@ class Settings:
     vad_padding_ms: int = _int("VAD_PADDING_MS", 300)
 
     # Back-compat alias used elsewhere in the code base.
-    silence_rms: float = _float("SILENCE_RMS", 0.005)
+    # NOTE: `silence_rms` is already declared above (line ~162). This
+    # block previously re-declared it, which Python silently allowed
+    # but which was a foot-gun for anyone editing the file. The
+    # authoritative declaration lives in the "Streaming UX" section.
     silence_duration_ms: int = _int("SILENCE_DURATION_MS", 700)
     vad_threshold: float = _float("VAD_THRESHOLD", 0.5)
 

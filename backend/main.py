@@ -68,9 +68,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Invisible Interview Assistant", lifespan=lifespan)
+# CORS: by default the backend is bound to 127.0.0.1 (see Settings),
+# so any browser on the same machine is same-origin and CORS does
+# not apply. If a user explicitly sets BACKEND_HOST=0.0.0.0 to run
+# the overlay on a different machine, only the loopback and LAN
+# origins they actually trust should be able to talk to it. The
+# default policy below allows only loopback; if you need LAN
+# access, set BACKEND_CORS_ALLOW_ORIGINS in .env to a comma-separated
+# list of allowed origins, e.g. "http://192.168.1.42:8765".
+import os as _os
+_cors_env = _os.getenv("BACKEND_CORS_ALLOW_ORIGINS", "").strip()
+if _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    # Safe default: only loopback. Anyone binding to 0.0.0.0 has
+    # to opt in to wider CORS explicitly.
+    _cors_origins = [
+        "http://127.0.0.1:*",
+        "http://localhost:*",
+    ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -594,6 +613,15 @@ async def microphone_loop() -> None:
             except _queue.Full:
                 # Drop the oldest and retry. This is safe because we
                 # only care about the latest partial + recent finals.
+                # Count + warn so a sustained overflow is visible.
+                nonlocal _dropped_events, _last_drop_warn_at
+                _dropped_events += 1
+                now = loop.time()
+                if now - _last_drop_warn_at > 5.0:
+                    print(f"[mic] WARNING: dropped {_dropped_events} "
+                          f"event(s) so far (consumer too slow).",
+                          flush=True)
+                    _last_drop_warn_at = now
                 try:
                     event_q.get_nowait()
                 except Exception:
@@ -602,6 +630,9 @@ async def microphone_loop() -> None:
                     event_q.put_nowait(payload)
                 except Exception:
                     pass
+
+        _dropped_events = 0
+        _last_drop_warn_at = 0.0
 
         # Each call to StreamingTranscriber.feed() invokes one of these
         # from the sounddevice audio thread. They must not block.
