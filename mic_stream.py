@@ -23,6 +23,7 @@ Usage
 
 Press Ctrl+C to stop.
 """
+
 from __future__ import annotations
 
 import argparse

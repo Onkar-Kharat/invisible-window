@@ -11,6 +11,7 @@ sounddevice==0.4.7
 numpy==1.26.4
 pydantic==2.7.4
 
+
 # Voice Activity Detection (CPU-cheap, works with Vosk)
 webrtcvad==2.0.10
 
